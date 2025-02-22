@@ -10,18 +10,40 @@ php artisan storage:link
 php artisan migrate
 ```
 
-Generate the csv file with the following command: 
+Generate the csv file with the following command:
+
 ```
 php artisan csv:generate
 ```
 
-Have FUN! 
+Have FUN!
 
 ### 1 Approach: One By One
 
 The most simples approach is to import one row at a time. This is the slowest approach, but it's the easiest to
 implement.
 It can run out of memory if you have a huge CSV file.
+
+```php
+ private function basicOneByOne(string $filePath): void
+    {
+         collect(file($filePath))
+            ->skip(1)
+            ->map(fn($line) => str_getcsv($line))
+            ->map(fn($row) => [
+                'custom_id' => $row[0],
+                'name' => $row[1],
+                'email' => $row[2],
+                'company' => $row[3],
+                'city' => $row[4],
+                'country' => $row[5],
+                'birthday' => $row[6],
+                'created_at' => now(),
+                'updated_at' => now(),
+            ])
+            ->each(fn($customer) => Customer::create($customer));
+    }
+```
 
 ### 2 Approach: Collect & Insert
 
@@ -30,12 +52,62 @@ This use only 1 query to insert all the rows.
 It can run out of memory if you have a huge CSV file.
 If the insert its to big they will be a problem with the max_allowed_packet
 
+```php
+private function collectAndInsert(string $filePath): void
+{
+    
+    $now = now()->format('Y-m-d H:i:s');
+
+    $allCustomers = collect(file($filePath))
+        ->skip(1)
+        ->map(fn ($line) => str_getcsv($line))
+        ->map(fn ($row) => [
+            'custom_id' => $row[0],
+            'name' => $row[1],
+            'email' => $row[2],
+            'company' => $row[3],
+            'city' => $row[4],
+            'country' => $row[5],
+            'birthday' => $row[6],
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+    Customer::insert($allCustomers->all());
+}
+```
+
 ### 3 Approach: Chunk
 
 We use the same approach as the previous one, but we use the `chunk` method from Laravel to split the CSV file into
 smaller parts.
 for every 1000 we make one query to insert the rows.
 But if the file its to big we will have a problem with Memory while loading the file
+
+```php
+private function collectAndChunk(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+
+    collect(file($filePath))
+        ->skip(1)
+        ->map(fn ($line) => str_getcsv($line))
+        ->map(fn ($row) => [
+            'custom_id' => $row[0],
+            'name' => $row[1],
+            'email' => $row[2],
+            'company' => $row[3],
+            'city' => $row[4],
+            'country' => $row[5],
+            'birthday' => $row[6],
+            'created_at' => $now,
+            'updated_at' => $now,
+        ])
+        ->chunk(1000)
+        ->each(fn ($chunk) => Customer::insert($chunk->all()));
+}
+
+```
 
 ### 4 Approach: Lazy Collection
 
@@ -44,10 +116,73 @@ keeping memory usage low.
 Its a bit more complex compared to the previous ones, its a much slower approach but it will not have memory problems (
 Till 1M rows)
 
+```php
+private function lazyCollection(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+
+    LazyCollection::make(function () use ($filePath) {
+        $handle = fopen($filePath, 'r');
+        fgets($handle); // skip header
+
+        while (($line = fgets($handle)) !== false) {
+            yield str_getcsv($line);
+        }
+        fclose($handle);
+    })
+        ->each(function ($row) use ($now) {
+            // Directly insert each row
+            Customer::insert([
+                'custom_id' => $row[0],
+                'name' => $row[1],
+                'email' => $row[2],
+                'company' => $row[3],
+                'city' => $row[4],
+                'country' => $row[5],
+                'birthday' => $row[6],
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+        });
+}
+```
+
 ### 5 Approach: Lazy Collection With Chunking
 
 We use the same approach as the previous one, but we use the `chunk` method from Laravel to split the CSV file into
 Again its not Faster and Again we will have problem with the Memory while loading the file on largerst file
+
+```php
+ private function lazyCollectionWithChunking(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+    $chunkSize = 1000; // Define your chunk size
+
+    LazyCollection::make(function () use ($filePath) {
+        $handle = fopen($filePath, 'r');
+        fgets($handle); // skip header
+
+        while (($line = fgets($handle)) !== false) {
+            yield str_getcsv($line);
+        }
+        fclose($handle);
+    })
+        ->map(fn ($row) => [
+            'custom_id' => $row[0],
+            'name' => $row[1],
+            'email' => $row[2],
+            'company' => $row[3],
+            'city' => $row[4],
+            'country' => $row[5],
+            'birthday' => $row[6],
+            'created_at' => $now,
+            'updated_at' => $now,
+        ])
+        ->chunk($chunkSize)
+        ->each(fn ($chunk) => Customer::insert($chunk->all()));
+}
+
+```
 
 ### 6 Approach: Lazy Collection With Chunking & PDO
 
@@ -56,11 +191,84 @@ the previous one, but with PDO statements.
 Till now it work with 1M rows and we use so much less memory (0.23 MB on every file)
 The only problem for that its it take 20-25seconds to import 1M rows
 
+```php
+private function lazyCollectionWithChunkingAndPdo(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+    $pdo = DB::connection()->getPdo();
+
+    LazyCollection::make(function () use ($filePath) {
+        $handle = fopen($filePath, 'rb');
+        fgetcsv($handle); // skip header
+
+        while (($line = fgetcsv($handle)) !== false) {
+            yield $line;
+        }
+        fclose($handle);
+    })
+        ->filter(fn($row) => filter_var($row[2], FILTER_VALIDATE_EMAIL))  // Nice filtering syntax
+        ->chunk(1000)
+        ->each(function ($chunk) use ($pdo, $now) {
+            //It uses PDO prepared statements, which reduces ORM overhead.
+
+            // Build SQL for this chunk
+            $placeholders = rtrim(str_repeat('(?,?,?,?,?,?,?,?,?),', $chunk->count()), ',');
+            $sql = 'INSERT INTO customers (custom_id, name, email, company, city, country, birthday, created_at, updated_at)
+            VALUES ' . $placeholders;
+
+            // Prepare values
+            $values = $chunk->flatMap(fn($row) => [
+                $row[0], $row[1], $row[2], $row[3], $row[4],
+                $row[5], $row[6], $now, $now,
+            ])->all();
+
+            $pdo->prepare($sql)->execute($values);
+        });
+}
+```
+
 ### 7 Approach: Manual Streaming With Chunking
 
 Trying to use the simplest Streaming approach with chunking, we use the `fgetcsv` function to read the CSV file line by
 line and insert
 The result its not good, it takes to much time and the memory using it fail on 1M rows
+
+```php
+ private function manualStreaming(string $filePath): void
+{
+    $data = [];
+    $chunkSize = 1000;
+    $handle = fopen($filePath, 'rb');
+    fgetcsv($handle); // skip header
+    $now = now()->format('Y-m-d H:i:s');
+
+    while (($row = fgetcsv($handle)) !== false) {
+        $data[] = [
+            'custom_id' => $row[0],
+            'name' => $row[1],
+            'email' => $row[2],
+            'company' => $row[3],
+            'city' => $row[4],
+            'country' => $row[5],
+            'birthday' => $row[6],
+            'created_at' => $now,
+            'updated_at' => $now,
+        ];
+
+        if (count($data) === $chunkSize) {
+            Customer::insert($data);
+            $data = [];
+        }
+    }
+
+    if (! empty($data)) {
+        Customer::insert($data);
+    }
+
+    fclose($handle);
+}
+
+```
 
 ### 8 Approach: Manual Streaming with Chunking & PDO
 
@@ -68,15 +276,144 @@ Using the same approach as the previous one, but with PDO statements.
 The result its on every file we use 0MB of memory and the time its 28-31 seconds for 1M rows
 It work on large file but the time its not the best
 
+```php
+private function manualStreamingWithPdo(string $filePath): void
+{
+    $data = [];
+    $handle = fopen($filePath, 'rb');
+    fgetcsv($handle); // skip header
+    $now = now()->format('Y-m-d H:i:s');
+    $pdo = DB::connection()->getPdo();
+
+    while (($row = fgetcsv($handle)) !== false) {
+        $data[] = [
+            'custom_id' => $row[0],
+            'name' => $row[1],
+            'email' => $row[2],
+            'company' => $row[3],
+            'city' => $row[4],
+            'country' => $row[5],
+            'birthday' => $row[6],
+            'created_at' => $now,
+            'updated_at' => $now,
+        ];
+
+        if (count($data) === 1000) {
+            // Build the SQL query for the chunk
+            $columns = array_keys($data[0]);
+            $placeholders = rtrim(str_repeat('(?,?,?,?,?,?,?,?,?),', count($data)), ',');
+
+            $sql = 'INSERT INTO customers (' . implode(',', $columns) . ') VALUES ' . $placeholders;
+
+            // Flatten the data array for the query
+            $values = [];
+            foreach ($data as $row) {
+                $values = array_merge($values, array_values($row));
+            }
+
+            $pdo->prepare($sql)->execute($values);
+            $data = [];
+        }
+    }
+
+    if (!empty($data)) {
+        $columns = array_keys($data[0]);
+        $placeholders = rtrim(str_repeat('(?,?,?,?,?,?,?,?,?),', count($data)), ',');
+
+        $sql = 'INSERT INTO customers (' . implode(',', $columns) . ') VALUES ' . $placeholders;
+
+        $values = [];
+        foreach ($data as $row) {
+            $values = array_merge($values, array_values($row));
+        }
+
+        $pdo->prepare($sql)->execute($values);
+    }
+
+    fclose($handle);
+}
+```
+
 ### 9 Approach: PDO Prepared Statements
 
 Using the PDO directly with prepared statements, we are using the raw SQL to insert the rows.
 We dont have the memory problem but the time its not the best, it takes 5 minutes for 1M rows
 
+```php
+private function PDOPrepared(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+    $handle = fopen($filePath, 'r');
+    fgets($handle); // skip header
+
+    try {
+        $pdo = DB::connection()->getPdo();
+        $stmt = $pdo->prepare('
+        INSERT INTO customers (custom_id, name, email, company, city, country, birthday, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ');
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $stmt->execute([
+                $row[0],
+                $row[1],
+                $row[2],
+                $row[3],
+                $row[4],
+                $row[5],
+                $row[6],
+                $now,
+                $now,
+            ]);
+        }
+    } finally {
+        fclose($handle);
+    }
+}
+
+```
+
 ### 10 Approach:  PDO Prepared Statements with Chunking
 
 Using the same approach as the previous one, but with PDO statements and chunking.
 The result its with 0MB of memory and the chunking make the file much faster
+
+```php
+private function PDOPreparedChunked(string $filePath): void
+{
+    
+    $now = now()->format('Y-m-d H:i:s');
+    $handle = fopen($filePath, 'r');
+    fgetcsv($handle); // skip header
+    $chunkSize = 500;
+    $chunks = [];
+
+    try {
+        $stmt = $this->prepareChunkedStatement($chunkSize);
+
+        while (($row = fgetcsv($handle)) !== false) {
+            $chunks = array_merge($chunks, [
+                $row[0], $row[1], $row[2], $row[3], $row[4],
+                $row[5], $row[6], $now, $now,
+            ]);
+
+            if (count($chunks) === $chunkSize * 9) {  // 9 columns
+                $stmt->execute($chunks);
+                $chunks = [];
+            }
+        }
+
+        // Handle remaining records
+        if (!empty($chunks)) {
+            $remainingRows = count($chunks) / 9;
+            $stmt = $this->prepareChunkedStatement($remainingRows);
+            $stmt->execute($chunks);
+        }
+    } finally {
+        fclose($handle);
+    }
+}
+```
 
 ### 11 Approach: Concurrently
 
@@ -87,11 +424,101 @@ In our case, we use 10 concurrent processes to insert the rows. witch make the r
 The timing much depends on the server and the number of concurrent processes they can handle and how well they can
 handle
 
+```php
+private function concurrent(string $filePath): void
+{
+    $now = now()->format('Y-m-d H:i:s');
+    $numberOfProcesses = 10;
+    $chunkSize = 1000;
+
+    $tasks = [];
+    for ($i = 0; $i < $numberOfProcesses; $i++) {
+        $tasks[] = function () use ($filePath, $i, $numberOfProcesses, $now, $chunkSize) {
+            DB::reconnect();
+
+            $handle = fopen($filePath, 'r');
+            fgets($handle); // Skip header
+            $currentLine = 0;
+            $customers = [];
+
+            while (($line = fgets($handle)) !== false) {
+                // Each process takes every Nth line
+                if ($currentLine++ % $numberOfProcesses !== $i) {
+                    continue;
+                }
+
+                $row = str_getcsv($line);
+                $customers[] = [
+                    'custom_id' => $row[0],
+                    'name' => $row[1],
+                    'email' => $row[2],
+                    'company' => $row[3],
+                    'city' => $row[4],
+                    'country' => $row[5],
+                    'birthday' => $row[6],
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
+
+                if (count($customers) === $chunkSize) {
+                    DB::table('customers')->insert($customers);
+                    $customers = [];
+                }
+            }
+
+            if (! empty($customers)) {
+                DB::table('customers')->insert($customers);
+            }
+
+            fclose($handle);
+
+            return true;
+        };
+    }
+
+    Concurrency::run($tasks);
+}
+```
+
 ### 12 Approach: Load Data Local Infile
 
 This is one of the fastest methods for bulk data insertion in MySQL
 It is much faster than inserting records one by one (like with INSERT statements) because it minimizes communication
 between the application and the database, handling bulk loading on the database server directly.
+
+```php
+
+private function loadDataInfile(string $filePath): void
+{
+    $pdo = DB::connection()->getPdo();
+    $pdo->setAttribute(PDO::MYSQL_ATTR_LOCAL_INFILE, true);
+
+    $filepath = str_replace('\\', '/', $filePath);
+
+    $query = <<<SQL
+        LOAD DATA LOCAL INFILE '$filepath'
+        INTO TABLE customers
+        FIELDS TERMINATED BY ','
+        ENCLOSED BY '"'
+        LINES TERMINATED BY '\n'
+        IGNORE 1 LINES
+        (@col1, @col2, @col3, @col4, @col5, @col6, @col7)
+        SET
+            custom_id = @col1,
+            name = @col2,
+            email = @col3,
+            company = @col4,
+            city = @col5,
+            country = @col6,
+            birthday = @col7,
+            created_at = NOW(),
+            updated_at = NOW()
+SQL;
+
+    $pdo->exec($query);
+}
+
+```
 
 #### What is Local Data Infile?
 
